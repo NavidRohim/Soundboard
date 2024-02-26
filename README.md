@@ -1,4 +1,0 @@
-# Soundboard
-
-macOS only.
-
