@@ -1,1 +1,4 @@
+colour==0.1.5
 pygame==2.5.2
+PyYAML==6.0.1
+tkmacosx==1.0.5
