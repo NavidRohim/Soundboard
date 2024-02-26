@@ -1,0 +1,12 @@
+*.wav
+*.ogg
+*.mp3
+*.log
+*.yml
+*.cfg
+
+lib/
+bin/
+include/
+
+.DS_Store
