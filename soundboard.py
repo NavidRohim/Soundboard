@@ -1,5 +1,3 @@
-from cProfile import label
-from ctypes import sizeof
 import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame
 
 
