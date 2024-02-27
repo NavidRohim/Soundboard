@@ -1,8 +1,14 @@
-import tkinter, tkmacosx, yaml, logging, os, math, dataclasses, pygame, random
+from cProfile import label
+from ctypes import sizeof
+import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame
+
 
 from typing import Any, NoReturn, Callable
 from tkinter import messagebox
 from abc import ABC, abstractmethod
+
+from tkinter import font as tkfont
+from pygame._sdl2.audio import get_audio_device_names
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.DEBUG)
@@ -27,10 +33,12 @@ class SoundboardConfig:
     error_image: str
     app_image: str
     warning_image: str
+    default_volume: float
 
 # Global functions
 
 def get_and_gen_yaml() -> dict[str, Any]:
+    
     default_config = {
         "sound_folder": "./audio",
         "media_folder": "./media/",
@@ -39,8 +47,10 @@ def get_and_gen_yaml() -> dict[str, Any]:
         "buttons_per_row": 5,
         "error_image": "bear.png",
         "app_image": "speaker.wave.3.png",
-        "warning_image": "why.png"
+        "warning_image": "why.png",
+        "default_volume": 0.5
     }
+    
     try:
         
         # Configuration file handling. Use `default_config` if the config file does not exist.
@@ -87,15 +97,23 @@ default_color = rgb_to_hex(255, 255, 255) # White
 default_highlight_color = rgb_to_hex(225, 225, 225) # Slightly darker white
 
 # Other
-config = SoundboardConfig(**get_and_gen_yaml())
-common_kwargs = {"sticky": "nsew", "pady": 1}
-
+try:
+    config = SoundboardConfig(**get_and_gen_yaml())
+    common_kwargs = {"sticky": "nsew", "pady": 1}
+    app_font = ("DINAlternate-Bold", 18)
+except TypeError:
+    print("Outdated configuration.")
+    exit(1)
+    
 class SoundboardABC(ABC):
     # Soundboard ABC. Basically just for type annotations
     
     def __init__(self) -> None:
         super().__init__()
-        
+        self._old_device: str | None = None
+        self.device_label = None
+        self.after_id = None
+        self.volume = config.default_volume
     @abstractmethod
     def change_iconphoto(self, default: bool, image: str) -> None:
         pass
@@ -131,17 +149,17 @@ class SoundboardDecorators:
         return _inner
 
 class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting from tkinter.Button so VSCode Intellisense functions correctly. It does not with tkmacos. tkinter.Button does not provide any functionality.
-    def __init__(self, master=None, cnf=..., **kw):
+    def __init__(self, master, cnf=..., **kw):
         tkmacosx.Button.__init__(self, master, cnf, **kw)
         self.master_color = self._org_bg
-        
+
 
         self.configure(
             relief=tkinter.RAISED,
             bd=0,
             highlightthickness=0,
             pady=50,
-            font=("DINAlternate-Bold", 18),
+            font=master.font,
             highlightbackground=self.master_color,
             highlightcolor=self.master_color,
             border=2
@@ -155,40 +173,78 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
     
     def on_elem_exit(self, event: tkinter.Event) -> None:
         self.configure(background=self.master_color)
-        
+         
 class Soundboard(tkinter.Tk, SoundboardABC):
     def __init__(self, screenName: str | None = None, baseName: str | None = None, className: str = "Tk", useTk: bool = True, sync: bool = False, use: str | None = None) -> None:
         tkinter.Tk.__init__(self, screenName, baseName, className, useTk, sync, use)
         SoundboardABC.__init__(self)
-        
 
         self.geometry("700x650")
         self.title(config.window_title)
         self.iconphoto(False, tkinter.PhotoImage(file=self.get_media_folder(config.app_image)))        
+        self.font: tkfont.Font = tkfont.Font(size=app_font[1], family=app_font[0])
         
+        self.set_volume(self.volume)
         self.grid_rowconfigure([row for row in range(config.buttons_per_row)], weight=5)
         self.render_sb_buttons()
-    
+                    
     def play_sound(self, sound_file: str) -> None:
         try:
+            selected_out = tuple(self.audio_select.curselection())
+            device = self.audio_select.get(selected_out[0]) if selected_out else None
+            if device != self._old_device:
+                pygame.mixer.quit()
+                pygame.mixer.init(devicename=device)
+                
+            self._old_device = device
+            
             pygame.mixer.music.load(f"{config.sound_folder}/{sound_file}")
             pygame.mixer.music.play()
+
         except pygame.error as err:
-            logger.error(f'Exception playing file "{sound_file}" -> {err}')
-            self.display_warning(f'Error decoding file: "{sound_file}" only .wav sound files are supported.')
+            if str(err).lower() == "no such device.":
+                self.display_warning(f'Cannot play on selected audio output. Perhaps it was unplugged?')    
+                self.reload_sounds()
+            else:
+                logger.error(f'Exception playing file "{sound_file}" -> {err}')
+                self.display_warning(f'Error decoding file: "{sound_file}" only .wav sound files are supported.')
+                
         except FileNotFoundError:
             self.display_warning(f'Missing sound file: "{sound_file}"')
+        except Exception as err:
+            logger.error(f"Error playing sound: {err} (File: {sound_file})")
+            if pygame.mixer.get_init():
+                pygame.mixer.quit()
+                
+    def get_avalible_audio_devices(self) -> list[str]:
+        pygame.mixer.init()
+        return get_audio_device_names(False)
     
     def stop_audio(self) -> None:
         # Stops any audio that is playing
-        pygame.mixer.music.stop()
-    
+        try:
+            pygame.mixer.music.stop()
+        except pygame.error as e:
+            logging.error(f"Mixer not init? ({e})")
+            
     def reload_sounds(self) -> None:
         # Re-renders all buttons
         for widget in self.winfo_children():
             widget.destroy()
             
         self.render_sb_buttons()
+    
+    def set_font_reload(self, event: tkinter.Event) -> None:
+        scale: tkinter.Scale = event.widget
+        size = int(scale.get())
+        
+        if size != int(self.font.actual('size')):
+            self.font = tkfont.Font(family=app_font[0], size=int(size))
+            self.reload_sounds()
+    
+    def set_volume(self, volume: int):
+        self.volume = volume
+        pygame.mixer.music.set_volume(volume / 1000)
         
     def render_sb_buttons(self):
         get_children = lambda: int(len(list(self.winfo_children())))
@@ -220,21 +276,77 @@ class Soundboard(tkinter.Tk, SoundboardABC):
 
             else:
                 # Render action buttons (Reload, stop)
-                
-                system_button_kwargs: dict[str, Any] = {"bg": rgb_to_hex(200, 200, 200)}
-                
-                row, column = 0, next_free_column()
+                master_color = rgb_to_hex(200, 200, 200)
+                system_button_kwargs: dict[str, Any] = {"bg": master_color}
+                column = next_free_column()
+                sys_background = self.cget("bg")
                 
                 cancel_all = SoundboardButton(self, text="Stop", command=self.stop_audio, activebackground="red", **system_button_kwargs)
-                cancel_all.grid(row=row, column=column, **common_kwargs)
+                cancel_all.grid(row=0, column=column, **common_kwargs)
                 
-                row, column = 1, column
                 reload = SoundboardButton(self, text="Reload", command=self.reload_sounds, activebackground="yellow", **system_button_kwargs)
-                reload.grid(row=row, column=column, **common_kwargs)
+                reload.grid(row=1, column=column, **common_kwargs)
                 
-                row, column = 2, column
                 exit = SoundboardButton(self, text="Exit", command=self.destroy, activebackground="black", **system_button_kwargs)
-                exit.grid(row=row, column=column, **common_kwargs)
+                exit.grid(row=2, column=column, **common_kwargs)
+                
+                audio_slider = tkinter.Scale(self, from_=0, to=100, orient=tkinter.HORIZONTAL, command=lambda sound: self.set_volume(int(sound)))
+                audio_slider.configure(
+                    relief=tkinter.RAISED,
+                    bd=0,
+                    highlightthickness=0,
+                    font=self.font,
+                    bg=sys_background,
+                    sliderrelief="flat",
+                )
+                audio_slider.grid(row=config.buttons_per_row, column=2, **common_kwargs)
+                audio_slider.set(self.volume)
+                    
+                font_slider = tkinter.Scale(self, from_=8, to=50, orient=tkinter.HORIZONTAL)
+                font_slider.set(int(self.font.actual('size')))
+                font_slider.configure(
+                    relief=tkinter.RAISED,
+                    bd=0,
+                    highlightthickness=0,
+                    font=self.font,
+                    bg=sys_background,
+                    sliderrelief="flat"
+                )
+                font_slider.bind("<ButtonRelease-1>", self.set_font_reload)
+                font_slider.grid(row=config.buttons_per_row, column=1, **common_kwargs)
+                
+                audio_devices = self.get_avalible_audio_devices()
+                self.device_label = tkinter.Label(self, text=f"Output Devices ({len(audio_devices)} Avalible)", **system_button_kwargs)
+                self.device_label.grid(row=3, column=column, **common_kwargs)
+                self.device_label.configure(
+                    relief=tkinter.RAISED,
+                    bd=0,
+                    highlightthickness=0,
+                    font=self.font,
+                    justify=tkinter.CENTER,
+                    bg=sys_background,
+                    pady=40
+                )
+                
+                self.audio_select = tkinter.Listbox(self, selectmode=tkinter.BROWSE, **system_button_kwargs)
+                self.audio_select.configure(
+                    relief=tkinter.RAISED,
+                    bd=0,
+                    highlightthickness=0,
+                    font=self.font,
+                    justify=tkinter.CENTER,
+                    bg=sys_background,
+                    width=20,
+                    height=5
+                )
+                
+                for ao_i, audio in enumerate(audio_devices):
+                    self.audio_select.insert(ao_i + 1, audio)
+                else:
+                    self.audio_select.grid(row=4, column=column, **common_kwargs)
+                
+                self.update_idletasks()
+                self.update()
                 
         except FileNotFoundError:
             self.display_error(f'Cannot locate audio file folder: "{config.sound_folder}"')
