@@ -143,7 +143,8 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
             pady=50,
             font=("DINAlternate-Bold", 18),
             highlightbackground=self.master_color,
-            highlightcolor=self.master_color
+            highlightcolor=self.master_color,
+            border=2
         )
         
         self.bind("<Enter>", self.on_elem_enter)
@@ -160,10 +161,12 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         tkinter.Tk.__init__(self, screenName, baseName, className, useTk, sync, use)
         SoundboardABC.__init__(self)
         
-        self.geometry("600x600")
+
+        self.geometry("700x650")
         self.title(config.window_title)
-        self.iconphoto(False, tkinter.PhotoImage(file=self.get_media_folder(config.app_image)))
+        self.iconphoto(False, tkinter.PhotoImage(file=self.get_media_folder(config.app_image)))        
         
+        self.grid_rowconfigure([row for row in range(config.buttons_per_row)], weight=5)
         self.render_sb_buttons()
     
     def play_sound(self, sound_file: str) -> None:
@@ -195,14 +198,17 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             
             def calculate_and_configure_r_and_c(predefined_child_count: int | None=None, weight: int=1) -> tuple[int, int]:
                 row, column = calculate_next_row(predefined_child_count), calculate_next_column(predefined_child_count)
-                self.grid_rowconfigure(row, weight=weight)
                 self.grid_columnconfigure(column, weight=weight)
                 return (row, column)
+            
+            def next_free_column() -> int:
+                c = calculate_next_column(get_children() + config.buttons_per_row)
+                self.grid_columnconfigure(c, weight=1)
+                return c
             
             sound_file: str
             
             # Render each button
-            # TODO: Make next_free_column function for making all operating buttons on the same column
             for sound_file in os.listdir(config.sound_folder):
                 # Check if it is a sound file
                 if sound_file.split(".")[-1] in config.supported_formats:
@@ -217,15 +223,16 @@ class Soundboard(tkinter.Tk, SoundboardABC):
                 
                 system_button_kwargs: dict[str, Any] = {"bg": rgb_to_hex(200, 200, 200)}
                 
-                row, column = calculate_and_configure_r_and_c() 
+                row, column = 0, next_free_column()
+                
                 cancel_all = SoundboardButton(self, text="Stop", command=self.stop_audio, activebackground="red", **system_button_kwargs)
                 cancel_all.grid(row=row, column=column, **common_kwargs)
                 
-                row, column = calculate_and_configure_r_and_c()
+                row, column = 1, column
                 reload = SoundboardButton(self, text="Reload", command=self.reload_sounds, activebackground="yellow", **system_button_kwargs)
                 reload.grid(row=row, column=column, **common_kwargs)
                 
-                row, column = calculate_and_configure_r_and_c()
+                row, column = 2, column
                 exit = SoundboardButton(self, text="Exit", command=self.destroy, activebackground="black", **system_button_kwargs)
                 exit.grid(row=row, column=column, **common_kwargs)
                 

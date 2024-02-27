@@ -8,5 +8,6 @@
 lib/
 bin/
 include/
+.vscode/
 
 .DS_Store
