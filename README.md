@@ -1,3 +1,3 @@
 # Soundboard
 
-macOS only.
+macOS only. Just a personal project.

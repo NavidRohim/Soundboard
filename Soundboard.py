@@ -428,4 +428,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         return self.display_error(f"Missing asset: {path}")
     
 if __name__ == "__main__":
+    from platform import platform
+    sys_platform = platform().startswith("macOS")
+    
+    if not sys_platform:
+        print(f"Incorrect platform ({sys_platform}) macOS only.")
+        exit(1)
     Soundboard().mainloop()
