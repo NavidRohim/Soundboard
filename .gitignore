@@ -4,10 +4,19 @@
 *.log
 *.yml
 *.cfg
+*.icns
+*.sh
+*.app
 
 lib/
 bin/
 include/
 .vscode/
+build/
+dist/
+.eggs/
+.vscode/
 
+compile
+setup.py
 .DS_Store
