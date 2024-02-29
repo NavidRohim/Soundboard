@@ -248,9 +248,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
     def reload_sounds(self) -> None:
         # Re-renders all buttons
         self.grid_rowconfigure([row for row in range(config.buttons_per_row)], weight=5)
-        for widget in self.winfo_children():
+        for i, widget in enumerate(self.winfo_children()):
+            self.grid_columnconfigure(i, weight=0)
             widget.destroy()
-        
+            
         self.render_sb_buttons()
         self.render_sys_buttons()
         
