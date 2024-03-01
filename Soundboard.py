@@ -13,6 +13,7 @@ program_config_home = f"{user_home_config}/soundboard"
 
 media_path = "./media/"
 sound_path = f"{program_config_home}/audio"
+max_sounds_at_once = 5
 
 # Check configuration exists
 if not os.path.exists(user_home_config):
@@ -120,6 +121,9 @@ class SoundboardABC(ABC):
     def __init__(self) -> None:
         super().__init__()
         self._old_device: str | None = None
+        self._playing_sounds: list[pygame.mixer.SoundType]  = []
+        self._sb_buttons: list[SoundboardButton] = []
+        
         self.device_label = None
         self.after_id = None
         self.volume = config.default_volume
@@ -179,10 +183,12 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
         self.bind("<Leave>", self.on_elem_exit)
     
     def on_elem_enter(self, event: tkinter.Event) -> None:
-        self.configure(background=default_highlight_color)
+        if not pygame.mixer.get_busy():
+            self.configure(background=default_highlight_color)
     
     def on_elem_exit(self, event: tkinter.Event) -> None:
-        self.configure(background=self.master_color)
+        if not pygame.mixer.get_busy():
+            self.configure(background=self.master_color)
          
 class Soundboard(tkinter.Tk, SoundboardABC):
     def __init__(self, screenName: str | None = None, baseName: str | None = None, className: str = "Tk", useTk: bool = True, sync: bool = False, use: str | None = None) -> None:
@@ -200,20 +206,40 @@ class Soundboard(tkinter.Tk, SoundboardABC):
                 
         self.set_volume(self.volume)
         self.reload_sounds()
-                    
-    def play_sound(self, sound_file: str) -> None:
+    
+    def _handle_audio_end(self, button_ref: pygame.mixer.SoundType, button: SoundboardButton):
         try:
+            button.configure(background=button.master_color)
+            self._playing_sounds.remove(button_ref)
+        except (tkinter.TclError, ValueError): # User reloaded soundboard, so original button cannot be found
+            pass
+        
+    def _set_all_buttons_default(self, color_name_or_hex: str | None=None) -> None:
+        for button in self._sb_buttons:
+            button.configure(background=button.master_color if color_name_or_hex == None else color_name_or_hex)
+    
+    def play_sound(self, button: SoundboardButton, sound_file: str) -> None:
+        try:
+            if len(self._playing_sounds) > max_sounds_at_once:
+                return self.display_warning(f"Cannot play more than {max_sounds_at_once} sounds.")
+            
             selected_out = tuple(self.audio_select.curselection())
             device = self.audio_select.get(selected_out[0]) if selected_out else None
+            
             if device != self._old_device:
                 pygame.mixer.quit()
                 pygame.mixer.init(devicename=device)
                 
             self._old_device = device
+            new_sound = pygame.mixer.Sound(f"{sound_path}/{sound_file}")
+            new_sound.set_volume(self.volume / 100)    
             
-            pygame.mixer.music.load(f"{sound_path}/{sound_file}")
-            pygame.mixer.music.play()
-
+            button.configure(background="green")
+            self._playing_sounds.append(new_sound)
+            self._playing_sounds[-1].play()
+            
+            self.after(int(new_sound.get_length() * 1000), lambda: self._handle_audio_end(new_sound, button))
+            
         except pygame.error as err:
             lowered_err = str(err).lower()
             
@@ -226,9 +252,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             else:
                 logger.error(f'Exception playing file "{sound_file}" -> {err}')
                 self.display_warning(f'Error decoding file: "{sound_file}" only .wav sound files are supported.')
-                
+        
         except FileNotFoundError:
             self.display_warning(f'Missing sound file: "{sound_file}"')
+            
         except Exception as err:
             logger.error(f"Error playing sound: {err} (File: {sound_file})")
             if pygame.mixer.get_init():
@@ -241,17 +268,30 @@ class Soundboard(tkinter.Tk, SoundboardABC):
     def stop_audio(self) -> None:
         # Stops any audio that is playing
         try:
-            pygame.mixer.music.stop()
+            for sound in self._playing_sounds:
+                sound.stop()
+            
+            self._set_all_buttons_default()
+            self._playing_sounds.clear()
+            
         except pygame.error as e:
             logging.error(f"Mixer not init? ({e})")
             
     def reload_sounds(self) -> None:
         # Re-renders all buttons
+        self.stop_audio()
         self.grid_rowconfigure([row for row in range(config.buttons_per_row)], weight=5)
+        
+        for button in self._sb_buttons:
+            button.destroy()
+            
         for i, widget in enumerate(self.winfo_children()):
             self.grid_columnconfigure(i, weight=0)
             widget.destroy()
             
+        self._sb_buttons.clear()
+        self._playing_sounds.clear()
+        
         self.render_sb_buttons()
         self.render_sys_buttons()
         
@@ -265,7 +305,9 @@ class Soundboard(tkinter.Tk, SoundboardABC):
     
     def set_volume(self, volume: int):
         self.volume = volume
-        pygame.mixer.music.set_volume(volume / 1000)
+        
+        for sound in self._playing_sounds:
+            sound.set_volume(volume / 100)
     
     def open_sound_folder(self):
         os.system(f"open --reveal {sound_path}/")
@@ -394,9 +436,11 @@ class Soundboard(tkinter.Tk, SoundboardABC):
                     
                     row, column = calculate_and_configure_r_and_c(5)
                                 
-                    bnt = SoundboardButton(self, text=sound_file, command=lambda file=sound_file: self.play_sound(file), activebackground=rgb_to_hex(190, 190, 190))
+                    bnt = SoundboardButton(self, text=sound_file, activebackground=rgb_to_hex(190, 190, 190))
                     bnt.grid(row=row, column=column, **common_kwargs)
-                
+                    bnt.configure(command=lambda file=sound_file, sb_b=bnt: self.play_sound(sb_b, file))
+                    self._sb_buttons.append(bnt)
+                    
         except FileNotFoundError:
             self.display_error(f'Cannot locate audio file folder: "{sound_path}"')
     
