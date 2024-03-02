@@ -424,6 +424,7 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             self.recording_thread = None
             
             self.after(2000, self.reload_sounds)
+            
     def place_slider(self, row: int, column: int, from_: int=0, to: int=60, text: str="Slider", command: Callable=str, configure_kwargs: dict[str, Any]={}, set_value: Any | None=None) -> tkinter.Scale:
         self.grid_columnconfigure(column, weight=1)
         
