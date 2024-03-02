@@ -1,12 +1,12 @@
-import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame, pdb, tempfile
+import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame, pdb, tempfile, pyaudio, threading, wave, numpy
 
-from typing import Any, NoReturn, Callable
+from typing import Any, NoReturn, Callable, Mapping, Iterable
 from tkinter import messagebox
 from abc import ABC, abstractmethod
 
 from tkinter import font as tkfont
 from pygame._sdl2.audio import get_audio_device_names
-
+    
 temp_directory = tempfile.gettempdir()
 user_home_config = os.path.expanduser("~/.config")
 program_config_home = f"{user_home_config}/soundboard"
@@ -38,6 +38,9 @@ file_handler.setFormatter(formatter)
 
 logger.addHandler(file_handler)
 configuration_file = f"{program_config_home}/soundboard_config.yml"
+
+class SoundboardError(Exception):
+    pass
 
 @dataclasses.dataclass
 class SoundboardConfig:
@@ -125,7 +128,8 @@ class SoundboardABC(ABC):
         self._old_device: str | None = None
         self._playing_sounds: list[pygame.mixer.SoundType]  = []
         self._sb_buttons: list[SoundboardButton] = []
-        
+
+        self.recording_thread: SoundboardRecordingThread | None = None
         self.device_label = None
         self.after_id = None
         self.volume = config.default_volume
@@ -164,6 +168,47 @@ class SoundboardDecorators:
             return func_out
         return _inner
 
+class SoundboardRecordingThread(threading.Thread):
+    def __init__(self, master: SoundboardABC, group: None = None, target: Callable[..., object] | None = None, name: str | None = None, args: Iterable[Any] = [], kwargs: Mapping[str, Any] | None = None, *, daemon: bool | None = None) -> None:
+        super().__init__(group, target, name, args, kwargs, daemon=daemon)
+        self._stop_event = threading.Event()
+        self.master = master
+        self.audio: bytes = b''
+        self.port_audio: pyaudio.PyAudio = pyaudio.PyAudio()
+        self.hertz = 44100
+        self.has_stopped = False
+        
+    def stop(self):
+        self._stop_event.set()
+        self.has_stopped = True
+        
+    def run(self) -> None:
+        
+        rec_stream = self.port_audio.open(rate=self.hertz, channels=1, format=pyaudio.paInt16, frames_per_buffer=1024, input=True)
+        frames = []
+        while not self._stop_event.is_set():
+            frames.append(rec_stream.read(1024))
+        
+        rec_stream.stop_stream()
+        rec_stream.close()
+        self.port_audio.terminate()
+        
+        mono_audio = b''.join(frames)
+        mono_raw = numpy.frombuffer(mono_audio, dtype=numpy.int16)
+        stereo_audio_np = numpy.repeat(mono_raw[:, numpy.newaxis], 2, axis=1)
+        self.audio = stereo_audio_np.astype(numpy.int16).tobytes()
+        
+        if all(b == 0 for b in self.audio):
+            self.master.display_warning("Audio is empty. Did you grant microphone permission from System Settings to this application?")
+    
+    def write_to_file(self, file_name: str="recording.wav"):
+        with wave.open(f"{sound_path}/{file_name}", 'wb') as wave_file:
+            wave_file.setnchannels(2)
+            wave_file.setsampwidth(self.port_audio.get_sample_size(pyaudio.paInt16))
+            wave_file.setframerate(self.hertz)
+            wave_file.writeframes(self.audio)
+    
+            
 class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting from tkinter.Button so VSCode Intellisense functions correctly. It does not with tkmacos. tkinter.Button does not provide any functionality.
     
     def __init__(self, master, cnf=..., **kw):
@@ -186,13 +231,16 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
         self.bind("<Leave>", self.on_elem_exit)
     
     def on_elem_enter(self, event: tkinter.Event) -> None:
-        if not pygame.mixer.get_busy():
-            self.configure(background=default_highlight_color)
+        if not pygame.mixer.get_busy() and self.cget("background") == self.master_color:
+            self["background"] = default_highlight_color
     
     def on_elem_exit(self, event: tkinter.Event) -> None:
-        if not pygame.mixer.get_busy():
-            self.configure(background=self.master_color)
-         
+        if not pygame.mixer.get_busy() and self.cget("background") == default_highlight_color:
+            self["background"] = self.master_color
+
+class SoundboardSystemButton(SoundboardButton):
+    pass
+        
 class Soundboard(tkinter.Tk, SoundboardABC):
     common_system_button_kwargs = {
         "sticky": "nsew",
@@ -215,9 +263,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         self.set_volume(self.volume)
         self.reload_sounds()
     
-    def _handle_audio_end(self, button_ref: pygame.mixer.SoundType, button: SoundboardButton):
+    def _handle_audio_end(self, button_ref: pygame.mixer.SoundType, button: SoundboardButton | None):
         try:
-            button.configure(background=button.master_color)
+            if button:
+                button.configure(background=button.master_color)
             self._playing_sounds.remove(button_ref)
         except (tkinter.TclError, ValueError): # User reloaded soundboard, so original button cannot be found
             pass
@@ -226,9 +275,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         for button in self._sb_buttons:
             button.configure(background=button.master_color if color_name_or_hex == None else color_name_or_hex)
     
-    def play_sound(self, button: SoundboardButton, sound_file: str) -> None:
+    def play_sound(self, button: SoundboardButton | None, sound_file: str | bytes) -> None:
         try:
-            new_sound = pygame.mixer.Sound(f"{sound_path}/{sound_file}")
+            
+            new_sound = pygame.mixer.Sound(file=f"{sound_path}/{sound_file}") if isinstance(sound_file, str) else pygame.mixer.Sound(buffer=sound_file)
             
             if new_sound.get_length() > 60:
                 return self.display_warning(f"Soundboard audio cannot be longer than 60 seconds.")
@@ -245,7 +295,8 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             self._old_device = device
             new_sound.set_volume(self.volume / 100)    
             
-            button.configure(background="green")
+            if button:
+                button.configure(background="green")
             self._playing_sounds.append(new_sound)
             self._playing_sounds[-1].play()
             
@@ -287,7 +338,12 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             
         except pygame.error as e:
             logging.error(f"Mixer not init? ({e})")
-            
+    
+    def init(self):
+        self.recording_thread = None
+        self._sb_buttons.clear()
+        self._playing_sounds.clear()
+        
     def reload_sounds(self) -> None:
         # Re-renders all buttons
         self.stop_audio()
@@ -299,10 +355,8 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         for i, widget in enumerate(self.winfo_children()):
             self.grid_columnconfigure(i, weight=0)
             widget.destroy()
-            
-        self._sb_buttons.clear()
-        self._playing_sounds.clear()
         
+        self.init()
         self.render_sb_buttons()
         self.render_sys_buttons()
         
@@ -322,10 +376,54 @@ class Soundboard(tkinter.Tk, SoundboardABC):
     
     def open_sound_folder(self):
         os.system(f"open --reveal {sound_path}/")
-    
+
     def start_recording(self):
-        ...
+        self.record_button.configure(bg="red")
+        self.recording_thread = SoundboardRecordingThread(self)
+        self.recording_thread.start()
+
+    
+    def _set_recording_buttons_highlight(self, on_off: bool):
         
+        if on_off == False:
+            self.record_button["background"] = self.record_button.master_color
+            self.playback_button["background"] = self.playback_button.master_color
+            self.save_recording_button["background"] = self.save_recording_button.master_color
+        else:
+            self.record_button["background"] = "red4"
+            self.playback_button["background"] = self.playback_button["activebackground"]
+            self.save_recording_button["background"] = self.save_recording_button["activebackground"]
+            
+    def recording_action(self):
+        if isinstance(self.recording_thread, SoundboardRecordingThread):
+            if self.recording_thread.has_stopped != True:
+                self.recording_thread.stop()
+                self._set_recording_buttons_highlight(True)
+            else:
+                self.recording_thread = None
+                self._set_recording_buttons_highlight(False)
+                
+        else:
+            self.start_recording()
+    
+    def listen_to_playback(self):
+        if isinstance(self.recording_thread, SoundboardRecordingThread):            
+            self.play_sound(None, self.recording_thread.audio)
+    
+    def write_playback_as_file(self):
+        
+        def _get_recorded_name(base_name: str, index: int=0) -> str:
+            name = f"{base_name}-{index}.wav"
+            if os.path.exists(f"{sound_path}/{name}"):
+                return _get_recorded_name(base_name, index + 1)
+            return name
+            
+        self._set_recording_buttons_highlight(False)
+        if isinstance(self.recording_thread, SoundboardRecordingThread):
+            self.recording_thread.write_to_file(_get_recorded_name("recording"))
+            self.recording_thread = None
+            
+            self.after(2000, self.reload_sounds)
     def place_slider(self, row: int, column: int, from_: int=0, to: int=60, text: str="Slider", command: Callable=str, configure_kwargs: dict[str, Any]={}, set_value: Any | None=None) -> tkinter.Scale:
         self.grid_columnconfigure(column, weight=1)
         
@@ -345,7 +443,7 @@ class Soundboard(tkinter.Tk, SoundboardABC):
 
         def next_free_column() -> int:
             c = self._calculate_next_column(self._get_children() + config.buttons_per_row)
-            self.grid_columnconfigure(c, weight=1)
+            self.grid_columnconfigure(c, weight=4)
             return c
         
         master_color = rgb_to_hex(185, 185, 185)
@@ -363,16 +461,13 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         }
         
         # Render action buttons (Stop, Reload, Exit, Sound Folder)
-        cancel_all = SoundboardButton(self, text="Stop", command=self.stop_audio, activebackground="red", **system_button_kwargs) # Stop
+        cancel_all = SoundboardSystemButton(self, text="Stop", command=self.stop_audio, activebackground="red", **system_button_kwargs) # Stop
         cancel_all.grid(row=0, column=column, **self.common_system_button_kwargs)
         
-        reload = SoundboardButton(self, text="Reload", command=self.reload_sounds, activebackground="yellow", **system_button_kwargs) # Reload
+        reload = SoundboardSystemButton(self, text="Reload", command=self.reload_sounds, activebackground="yellow", **system_button_kwargs) # Reload
         reload.grid(row=1, column=column, **self.common_system_button_kwargs)
         
-        #exit = SoundboardButton(self, text="Exit", command=self.destroy, activebackground="black", **system_button_kwargs) # Exit
-        #exit.grid(row=2, column=column, **self.common_system_button_kwargs)
-        
-        show_sound_folder = SoundboardButton(self, text="Open Sound Folder", command=self.open_sound_folder, activebackground="orange", **system_button_kwargs)
+        show_sound_folder = SoundboardSystemButton(self, text="Open Sound Folder", command=self.open_sound_folder, activebackground="orange", **system_button_kwargs)
         show_sound_folder.grid(row=2, column=column, **self.common_system_button_kwargs)
         
         self.device_label = tkinter.Label(self, text=f"Output Devices ({len(audio_devices)} Avalible)", **system_button_kwargs)
@@ -412,13 +507,18 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         
         # XXX: Second column of system buttons
         
-        #column += 1
+        column += 1
         
-        #record_button = SoundboardButton(self, text="Record", activebackground="red", **system_button_kwargs)
-        #record_button.grid(row=0, column=column, **self.common_system_button_kwargs)
+        self.record_button = SoundboardSystemButton(self, text="Record / Bin Recording", activebackground="red", command=self.recording_action, **system_button_kwargs)
+        self.record_button.grid(row=0, column=column, **self.common_system_button_kwargs)
         
-        # TODO: Link Stop button with recording
-        #play_from_slider = self.place_slider(row=7, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
+        self.playback_button = SoundboardSystemButton(self, text="Playback Recording", activebackground="light blue", command=self.listen_to_playback, **system_button_kwargs)
+        self.playback_button.grid(row=1, column=column, **self.common_system_button_kwargs)
+        
+        self.save_recording_button = SoundboardSystemButton(self, text="Save Recording", activebackground="light green", command=self.write_playback_as_file, **system_button_kwargs)
+        self.save_recording_button.grid(row=2, column=column, **self.common_system_button_kwargs)
+        
+        play_from_slider = self.place_slider(row=7, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
         
         self.update_idletasks()
         self.update()

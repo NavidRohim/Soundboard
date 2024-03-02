@@ -1,5 +1,7 @@
 cffi==1.16.0
 colour==0.1.5
+numpy==1.26.4
+PyAudio==0.2.14
 pycparser==2.21
 pygame==2.5.2
 PyYAML==6.0.1
