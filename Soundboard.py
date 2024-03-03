@@ -133,6 +133,7 @@ class SoundboardABC(ABC):
         self.device_label = None
         self.after_id = None
         self.volume = config.default_volume
+        self.font: tkfont.Font
         
     @abstractmethod
     def change_iconphoto(self, default: bool, image: str) -> None:
@@ -144,6 +145,10 @@ class SoundboardABC(ABC):
     
     @abstractmethod
     def display_warning(self, message: str) -> None:
+        pass
+    
+    @abstractmethod
+    def reload_sounds(self) -> None:
         pass
     
 class SoundboardDecorators:
@@ -211,9 +216,10 @@ class SoundboardRecordingThread(threading.Thread):
             
 class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting from tkinter.Button so VSCode Intellisense functions correctly. It does not with tkmacos. tkinter.Button does not provide any functionality.
     
-    def __init__(self, master, cnf=..., **kw):
+    def __init__(self, master: SoundboardABC, cnf=..., **kw):
         tkmacosx.Button.__init__(self, master, cnf, **kw)
         self.master_color = self._org_bg
+        self.owner_master = master
 
 
         self.configure(
@@ -229,6 +235,7 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
         
         self.bind("<Enter>", self.on_elem_enter)
         self.bind("<Leave>", self.on_elem_exit)
+        self.bind("<Delete>", self.on_elem_press_del)
     
     def on_elem_enter(self, event: tkinter.Event) -> None:
         if not pygame.mixer.get_busy() and self.cget("background") == self.master_color:
@@ -238,6 +245,14 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
         if not pygame.mixer.get_busy() and self.cget("background") == default_highlight_color:
             self["background"] = self.master_color
 
+    def on_elem_press_del(self, event: tkinter.Event) -> None:
+        try:
+            os.remove(f"{sound_path}/{self["text"]}")
+        except FileNotFoundError:
+            pass
+        
+        self.owner_master.reload_sounds()
+        
 class SoundboardSystemButton(SoundboardButton):
     pass
         
@@ -259,10 +274,19 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         except tkinter.TclError as error:
             logger.error(f"Missing asset during initisalisation. Error: {error}")
             self.display_error(f"Missing assets. Check log file.")
-                
+        
+        self.protocol("WM_DELETE_WINDOW", self._handle_close)
         self.set_volume(self.volume)
         self.reload_sounds()
     
+    def _handle_close(self):
+        if isinstance(self.recording_thread, SoundboardRecordingThread):
+            self.recording_thread.stop()
+        
+        self.stop_audio()
+        self.destroy()
+        exit(0)
+        
     def _handle_audio_end(self, button_ref: pygame.mixer.SoundType, button: SoundboardButton | None):
         try:
             if button:
@@ -423,7 +447,7 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             self.recording_thread.write_to_file(_get_recorded_name("recording"))
             self.recording_thread = None
             
-            self.after(2000, self.reload_sounds)
+            self.after(500, self.reload_sounds)
             
     def place_slider(self, row: int, column: int, from_: int=0, to: int=60, text: str="Slider", command: Callable=str, configure_kwargs: dict[str, Any]={}, set_value: Any | None=None) -> tkinter.Scale:
         self.grid_columnconfigure(column, weight=1)
@@ -519,7 +543,7 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         self.save_recording_button = SoundboardSystemButton(self, text="Save Recording", activebackground="light green", command=self.write_playback_as_file, **system_button_kwargs)
         self.save_recording_button.grid(row=2, column=column, **self.common_system_button_kwargs)
         
-        play_from_slider = self.place_slider(row=7, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
+        #play_from_slider = self.place_slider(row=7, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
         
         self.update_idletasks()
         self.update()
@@ -587,9 +611,5 @@ class Soundboard(tkinter.Tk, SoundboardABC):
 if __name__ == "__main__":
     from platform import platform
     sys_platform = platform().startswith("macOS")
-    
-    if not sys_platform:
-        print(f"Incorrect platform ({sys_platform}) macOS only.")
-        exit(1)
         
     Soundboard().mainloop()
