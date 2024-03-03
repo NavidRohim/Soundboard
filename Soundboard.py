@@ -1,5 +1,4 @@
-from email.mime import base
-import random
+
 import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame, pdb, tempfile, pyaudio, threading, wave, numpy
 from pynput.keyboard._base import Key, KeyCode
 
@@ -138,6 +137,7 @@ class SoundboardABC(ABC):
         self.device_label = None
         self.after_id = None
         self.volume = config.default_volume
+        self.input_devices: dict[int, str] = {}
         self.font: tkfont.Font
         
     @abstractmethod
@@ -179,38 +179,46 @@ class SoundboardDecorators:
         return _inner
 
 class SoundboardRecordingThread(threading.Thread):
-    def __init__(self, master: SoundboardABC, group: None = None, target: Callable[..., object] | None = None, name: str | None = None, args: Iterable[Any] = [], kwargs: Mapping[str, Any] | None = None, *, daemon: bool | None = None) -> None:
-        super().__init__(group, target, name, args, kwargs, daemon=daemon)
+    def __init__(self, master: SoundboardABC, input_device_index: int | None=None) -> None:
+        super().__init__()
+        
         self._stop_event = threading.Event()
         self.master = master
         self.audio: bytes = b''
         self.port_audio: pyaudio.PyAudio = pyaudio.PyAudio()
         self.hertz = 44100
         self.has_stopped = False
-
+        self.device = input_device_index
+        
     def stop(self):
         self._stop_event.set()
         self.has_stopped = True
         
     def run(self) -> None:
         
-        rec_stream = self.port_audio.open(rate=self.hertz, channels=1, format=pyaudio.paInt16, frames_per_buffer=1024, input=True)
-        frames = []
-        while not self._stop_event.is_set():
-            frames.append(rec_stream.read(1024))
-        
-        rec_stream.stop_stream()
-        rec_stream.close()
-        self.port_audio.terminate()
-        
-        mono_audio = b''.join(frames)
-        mono_raw = numpy.frombuffer(mono_audio, dtype=numpy.int16)
-        stereo_audio_np = numpy.repeat(mono_raw[:, numpy.newaxis], 2, axis=1)
-        self.audio = stereo_audio_np.astype(numpy.int16).tobytes()
-        
-        if all(b == 0 for b in self.audio):
-            self.master.display_warning("Audio is empty. Did you grant microphone permission from System Settings to this application?")
-    
+        try:
+            rec_stream = self.port_audio.open(rate=self.hertz, channels=1, format=pyaudio.paInt16, frames_per_buffer=1024, input=True, input_device_index=self.device)
+            frames = []
+            while not self._stop_event.is_set():
+                frames.append(rec_stream.read(1024))
+            
+            rec_stream.stop_stream()
+            rec_stream.close()
+            self.port_audio.terminate()
+            
+            mono_audio = b''.join(frames)
+            mono_raw = numpy.frombuffer(mono_audio, dtype=numpy.int16)
+            stereo_audio_np = numpy.repeat(mono_raw[:, numpy.newaxis], 2, axis=1)
+            self.audio = stereo_audio_np.astype(numpy.int16).tobytes()
+            
+            if all(b == 0 for b in self.audio):
+                self.master.display_warning("Audio is empty. Did you grant microphone permission from System Settings to this application?")
+                
+        except OSError as audio_error:
+            logger.error(f"Audio error (Usually input): {audio_error}")
+            self.master.display_warning("Was your selected microphone unplugged? Microphone no longer found.")
+            self.master.reload_sounds()
+            
     def write_to_file(self, file_name: str="recording.wav"):
         with wave.open(f"{sound_path}/{file_name}", 'wb') as wave_file:
             wave_file.setnchannels(2)
@@ -395,6 +403,22 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         pygame.mixer.init()
         return get_audio_device_names(False)
     
+    def get_avalible_input_devices(self) -> dict[int, str]:
+        
+        port_audio = pyaudio.PyAudio()
+        info = port_audio.get_host_api_info_by_index(0)                                         
+        numdevices = info.get('deviceCount')                                           
+        device_dict = {}
+        
+        if isinstance(numdevices, int):
+            for i in range(0, numdevices):
+                device_has_input = port_audio.get_device_info_by_index(i).get('maxInputChannels')
+                if isinstance(device_has_input, (int, float)) and device_has_input > 0:            
+                    device_dict[i] = port_audio.get_device_info_by_index(i).get('name')
+
+        port_audio.terminate()
+        return device_dict
+        
     def stop_audio(self) -> None:
         # Stops any audio that is playing
         try:
@@ -446,10 +470,16 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         os.system(f"open --reveal {sound_path}/")
 
     def start_recording(self):
-        self.record_button.configure(bg="red")
-        self.recording_thread = SoundboardRecordingThread(self)
-        self.recording_thread.start()
-
+        try:
+            input_device_select = tuple(self.input_select.curselection())
+            actual_selection_index_name = list(self.input_devices)[input_device_select[0]] if input_device_select and self.input_devices else None
+            
+            self.record_button.configure(bg="red")
+            self.recording_thread = SoundboardRecordingThread(self, input_device_index=actual_selection_index_name)
+            self.recording_thread.start()
+        except (IndexError, KeyError):
+            self.display_error("Was your selected microphone unplugged? Microphone no longer found.")
+            self.reload_sounds()
     
     def _set_recording_buttons_highlight(self, on_off: bool):
         
@@ -519,7 +549,9 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         system_button_kwargs: dict[str, Any] = {"bg": master_color}
         column = next_free_column()
         sys_background = self.cget("bg")
+        
         audio_devices = self.get_avalible_audio_devices()
+        self.input_devices = self.get_avalible_input_devices()
         
         common_scale_args = {
             "bd": 0,
@@ -527,6 +559,15 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             "font": self.font,
             "bg": sys_background,
             "sliderrelief": "sunken"
+        }
+        label_args = {
+            "relief": tkinter.RAISED,
+            "bd": 0,
+            "highlightthickness": 0,
+            "font": self.font,
+            "justify": tkinter.CENTER,
+            "bg": sys_background,
+            "pady": 40
         }
         
         # Render action buttons (Stop, Reload, Exit, Sound Folder)
@@ -541,15 +582,7 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         
         self.device_label = tkinter.Label(self, text=f"Output Devices ({len(audio_devices)} Avalible)", **system_button_kwargs)
         self.device_label.grid(row=3, column=column, **self.common_system_button_kwargs)
-        self.device_label.configure(
-            relief=tkinter.RAISED,
-            bd=0,
-            highlightthickness=0,
-            font=self.font,
-            justify=tkinter.CENTER,
-            bg=sys_background,
-            pady=40
-        )
+        self.device_label.configure(**label_args)
         
         self.audio_select = tkinter.Listbox(self, selectmode=tkinter.BROWSE, **system_button_kwargs)
         self.audio_select.configure(
@@ -587,7 +620,29 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         self.save_recording_button = SoundboardSystemButton(self, text="Save Recording", activebackground="light green", command=self.write_playback_as_file, **system_button_kwargs)
         self.save_recording_button.grid(row=2, column=column, **self.common_system_button_kwargs)
         
-        #play_from_slider = self.place_slider(row=7, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
+        self.input_device_label = tkinter.Label(self, text=f"Input Devices ({len(self.input_devices)} Avalible)", **system_button_kwargs)
+        self.input_device_label.grid(row=3, column=column, **self.common_system_button_kwargs)
+        self.input_device_label.configure(**label_args)
+        
+        self.input_select = tkinter.Listbox(self, selectmode=tkinter.BROWSE, **system_button_kwargs)
+        self.input_select.configure(
+            relief=tkinter.RAISED,
+            bd=0,
+            highlightthickness=0,
+            font=self.font,
+            justify=tkinter.CENTER,
+            bg=sys_background,
+            width=20,
+            height=5
+        )
+        
+        for ai_i, input in enumerate(self.input_devices.items()):
+            self.input_select.insert(ai_i + 1, input[1])
+        else:
+            self.input_select.grid(row=4, column=column, **self.common_system_button_kwargs)
+            
+        #end_at_slider = self.place_slider(row=5, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
+        #play_from_slider = self.place_slider(row=7, column=column, text="End At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
         
         self.update_idletasks()
         self.update()
