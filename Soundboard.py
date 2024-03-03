@@ -1,12 +1,17 @@
+from email.mime import base
+import random
 import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame, pdb, tempfile, pyaudio, threading, wave, numpy
+from pynput.keyboard._base import Key, KeyCode
 
-from typing import Any, NoReturn, Callable, Mapping, Iterable
+from typing import Any, NoReturn, Callable, Mapping, Iterable, override
 from tkinter import messagebox
 from abc import ABC, abstractmethod
 
 from tkinter import font as tkfont
 from pygame._sdl2.audio import get_audio_device_names
     
+from pynput.keyboard import HotKey, Listener
+
 temp_directory = tempfile.gettempdir()
 user_home_config = os.path.expanduser("~/.config")
 program_config_home = f"{user_home_config}/soundboard"
@@ -24,7 +29,7 @@ if not os.path.exists(program_config_home):
 
 if not os.path.exists(sound_path):
     os.mkdir(sound_path)
-
+        
 # Setup logging
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.DEBUG)
@@ -182,7 +187,7 @@ class SoundboardRecordingThread(threading.Thread):
         self.port_audio: pyaudio.PyAudio = pyaudio.PyAudio()
         self.hertz = 44100
         self.has_stopped = False
-        
+
     def stop(self):
         self._stop_event.set()
         self.has_stopped = True
@@ -212,7 +217,32 @@ class SoundboardRecordingThread(threading.Thread):
             wave_file.setsampwidth(self.port_audio.get_sample_size(pyaudio.paInt16))
             wave_file.setframerate(self.hertz)
             wave_file.writeframes(self.audio)
-    
+
+class SoundboardKeyboardListenerThread(Listener):
+    def __init__(self, master: SoundboardABC) -> None:
+        super().__init__(self.on_press, self.on_release)
+        
+        base_keypress = "<tab>"
+        
+        self.master = master
+        self.hotkeys = [HotKey(HotKey.parse(f"{base_keypress}+{i}"), lambda index=i: self.master.play_sound(None, index - 1)) for i in range(1, 10)] # type: ignore
+        self.hotkeys.extend([
+            HotKey(HotKey.parse(f'{base_keypress}+r'), lambda: self.master.recording_action()), # type: ignore
+            HotKey(HotKey.parse(f'{base_keypress}+p'), lambda: self.master.listen_to_playback()), # type: ignore
+            HotKey(HotKey.parse(f'{base_keypress}+s'), lambda: self.master.write_playback_as_file()), # type: ignore
+            HotKey(HotKey.parse(f'{base_keypress}+q'), lambda: self.master.stop_audio()), # type: ignore
+            HotKey(HotKey.parse(f'{base_keypress}+0'), lambda: self.master.reload_sounds())
+        ])
+        
+        self.start()
+            
+    def on_press(self, key):
+        for hotkey in self.hotkeys: 
+            hotkey.press(key)                                                                                                                                                                    
+                                                                                                                                                                                            
+    def on_release(self, key):                                                                                                                                                                         
+        for hotkey in self.hotkeys:                                                                                                                                                            
+            hotkey.release(key) 
             
 class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting from tkinter.Button so VSCode Intellisense functions correctly. It does not with tkmacos. tkinter.Button does not provide any functionality.
     
@@ -276,6 +306,8 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             self.display_error(f"Missing assets. Check log file.")
         
         self.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self._kb_listener_thread = SoundboardKeyboardListenerThread(self)
+        
         self.set_volume(self.volume)
         self.reload_sounds()
     
@@ -299,10 +331,18 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         for button in self._sb_buttons:
             button.configure(background=button.master_color if color_name_or_hex == None else color_name_or_hex)
     
-    def play_sound(self, button: SoundboardButton | None, sound_file: str | bytes) -> None:
+    def play_sound(self, button: SoundboardButton | None, sound_file: str | bytes | int) -> None:
         try:
             
-            new_sound = pygame.mixer.Sound(file=f"{sound_path}/{sound_file}") if isinstance(sound_file, str) else pygame.mixer.Sound(buffer=sound_file)
+            if isinstance(sound_file, str):
+                new_sound = pygame.mixer.Sound(file=f"{sound_path}/{sound_file}")
+            elif isinstance(sound_file, bytes):
+                new_sound = pygame.mixer.Sound(buffer=sound_file)
+            elif isinstance(sound_file, int):
+                new_sound = pygame.mixer.Sound(file=f"{sound_path}/{self._sb_buttons[sound_file]["text"]}")
+                button = self._sb_buttons[sound_file]
+            else:
+                raise TypeError(f"`sound_file` must be str (path), bytes (Raw PCM), or int (sound index)")
             
             if new_sound.get_length() > 60:
                 return self.display_warning(f"Soundboard audio cannot be longer than 60 seconds.")
@@ -341,9 +381,13 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         
         except FileNotFoundError:
             self.display_warning(f'Missing sound file: "{sound_file}"')
-            
+        
+        except IndexError:
+            pass
+        
         except Exception as err:
             logger.error(f"Error playing sound: {err} (File: {sound_file})")
+            self.display_warning(f"Error playing sound: {err} (File: {sound_file})")
             if pygame.mixer.get_init():
                 pygame.mixer.quit()
                 
@@ -566,7 +610,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
                 return (row, column)
         
             # Render each button
-            for sound_file in os.listdir(sound_path):
+            files_abc = os.listdir(sound_path)
+            files_abc.sort()
+            
+            for sound_file in files_abc:
                 # Check if it is a sound file
                 if sound_file.split(".")[-1] in config.supported_formats:
                     
