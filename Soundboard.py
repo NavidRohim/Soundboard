@@ -1,8 +1,7 @@
 
 import tkinter, tkmacosx, yaml, logging, os, dataclasses, pygame, pdb, tempfile, pyaudio, threading, wave, numpy
-from pynput.keyboard._base import Key, KeyCode
 
-from typing import Any, NoReturn, Callable, Mapping, Iterable, override
+from typing import Any, NoReturn, Callable
 from tkinter import messagebox
 from abc import ABC, abstractmethod
 
@@ -230,7 +229,7 @@ class SoundboardKeyboardListenerThread(Listener):
     def __init__(self, master: SoundboardABC) -> None:
         super().__init__(self.on_press, self.on_release)
         
-        base_keypress = "<tab>"
+        base_keypress = "<ctrl_r>+<shift>"
         
         self.master = master
         self.hotkeys = [HotKey(HotKey.parse(f"{base_keypress}+{i}"), lambda index=i: self.master.play_sound(None, index - 1)) for i in range(1, 10)] # type: ignore
@@ -274,6 +273,7 @@ class SoundboardButton(tkmacosx.Button, tkinter.Button): # NOTE: Inheriting fro
         self.bind("<Enter>", self.on_elem_enter)
         self.bind("<Leave>", self.on_elem_exit)
         self.bind("<Delete>", self.on_elem_press_del)
+        self.bind("<BackSpace>", self.on_elem_press_del)
     
     def on_elem_enter(self, event: tkinter.Event) -> None:
         if not pygame.mixer.get_busy() and self.cget("background") == self.master_color:
