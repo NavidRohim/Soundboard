@@ -113,6 +113,7 @@ def rgb_to_hex(r: int, g: int, b: int):
 # Colors
 default_color = rgb_to_hex(255, 255, 255) # White
 default_highlight_color = rgb_to_hex(225, 225, 225) # Slightly darker white
+base_keypress = "<ctrl_r>+<shift>"
 
 # Other
 try:
@@ -228,8 +229,6 @@ class SoundboardRecordingThread(threading.Thread):
 class SoundboardKeyboardListenerThread(Listener):
     def __init__(self, master: SoundboardABC) -> None:
         super().__init__(self.on_press, self.on_release)
-        
-        base_keypress = "<ctrl_r>+<shift>"
         
         self.master = master
         self.hotkeys = [HotKey(HotKey.parse(f"{base_keypress}+{i}"), lambda index=i: self.master.play_sound(None, index - 1)) for i in range(1, 10)] # type: ignore
@@ -363,9 +362,9 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             if device != self._old_device:
                 pygame.mixer.quit()
                 pygame.mixer.init(devicename=device)
-                
-            self._old_device = device
-            new_sound.set_volume(self.volume / 100)    
+            
+            self._old_device = device    
+            new_sound.set_volume(self.volume)
             
             if button:
                 button.configure(background="green")
@@ -413,8 +412,10 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         if isinstance(numdevices, int):
             for i in range(0, numdevices):
                 device_has_input = port_audio.get_device_info_by_index(i).get('maxInputChannels')
-                if isinstance(device_has_input, (int, float)) and device_has_input > 0:            
-                    device_dict[i] = port_audio.get_device_info_by_index(i).get('name')
+                if isinstance(device_has_input, (int, float)) and device_has_input > 0:
+                    device_name = port_audio.get_device_info_by_index(i).get('name')
+                    if device_name:
+                        device_dict[i] = port_audio.get_device_info_by_index(i).get('name')
 
         port_audio.terminate()
         return device_dict
@@ -460,8 +461,8 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             self.font = tkfont.Font(family=app_font[0], size=int(size))
             self.reload_sounds()
     
-    def set_volume(self, volume: int):
-        self.volume = volume
+    def set_volume(self, volume: int | float):
+        self.volume = volume / 100
         
         for sound in self._playing_sounds:
             sound.set_volume(volume / 100)
@@ -569,6 +570,16 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             "bg": sys_background,
             "pady": 40
         }
+        listbox_args = {
+            "relief": tkinter.RAISED,
+            "bd": 0,
+            "highlightthickness": 0,
+            "font": self.font,
+            "justify": tkinter.CENTER,
+            "bg": sys_background,
+            "width": 20,
+            "height": 5
+        }
         
         # Render action buttons (Stop, Reload, Exit, Sound Folder)
         cancel_all = SoundboardSystemButton(self, text="Stop", command=self.stop_audio, activebackground="red", **system_button_kwargs) # Stop
@@ -585,16 +596,7 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         self.device_label.configure(**label_args)
         
         self.audio_select = tkinter.Listbox(self, selectmode=tkinter.BROWSE, **system_button_kwargs)
-        self.audio_select.configure(
-            relief=tkinter.RAISED,
-            bd=0,
-            highlightthickness=0,
-            font=self.font,
-            justify=tkinter.CENTER,
-            bg=sys_background,
-            width=20,
-            height=5
-        )
+        self.audio_select.configure(**listbox_args)
         
         for ao_i, audio in enumerate(audio_devices):
             self.audio_select.insert(ao_i + 1, audio)
@@ -602,10 +604,6 @@ class Soundboard(tkinter.Tk, SoundboardABC):
             self.audio_select.grid(row=4, column=column, **self.common_system_button_kwargs)
             
         # Sliders (Scale) and Labels for sliders
-        
-        self.place_slider(row=5, column=column, from_=0, to=100, text="Volume Adj.", command=lambda sound: self.set_volume(int(sound)), configure_kwargs=common_scale_args, set_value=self.volume)
-        font_slider = self.place_slider(row=7, column=column, from_=8, to=50, text="Scale Adj.", configure_kwargs=common_scale_args, set_value=self.font.actual('size'))
-        font_slider.bind("<ButtonRelease-1>", self.set_font_reload)
         
         # XXX: Second column of system buttons
         
@@ -625,25 +623,17 @@ class Soundboard(tkinter.Tk, SoundboardABC):
         self.input_device_label.configure(**label_args)
         
         self.input_select = tkinter.Listbox(self, selectmode=tkinter.BROWSE, **system_button_kwargs)
-        self.input_select.configure(
-            relief=tkinter.RAISED,
-            bd=0,
-            highlightthickness=0,
-            font=self.font,
-            justify=tkinter.CENTER,
-            bg=sys_background,
-            width=20,
-            height=5
-        )
-        
+        self.input_select.configure(**listbox_args)
+            
         for ai_i, input in enumerate(self.input_devices.items()):
             self.input_select.insert(ai_i + 1, input[1])
         else:
             self.input_select.grid(row=4, column=column, **self.common_system_button_kwargs)
-            
-        #end_at_slider = self.place_slider(row=5, column=column, text="Start At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
-        #play_from_slider = self.place_slider(row=7, column=column, text="End At", command=lambda a: print("hello"), configure_kwargs=common_scale_args)
         
+        self.place_slider(row=5, column=column, from_=0, to=100, text="Volume Adj.", command=lambda sound: self.set_volume(float(sound)), configure_kwargs=common_scale_args, set_value=self.volume * 100)
+        font_slider = self.place_slider(row=7, column=column, from_=8, to=50, text="Scale Adj.", configure_kwargs=common_scale_args, set_value=self.font.actual('size'))
+        font_slider.bind("<ButtonRelease-1>", self.set_font_reload)
+            
         self.update_idletasks()
         self.update()
     
